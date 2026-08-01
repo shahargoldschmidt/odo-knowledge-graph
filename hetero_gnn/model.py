@@ -25,6 +25,7 @@ import sys
 import torch
 import torch.nn as nn
 from torch_geometric.utils import scatter
+from torch_geometric.utils import softmax
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -116,10 +117,16 @@ class HeteroOpioidGNN(nn.Module):
         self.document_encoder = _encoder(document_journal_emb_dim + 3, hidden, dropout)  # + is_patent, norm_year, is_unknown
 
         # --- Message passing (§7): hop 1 -> Assay; hop 2 -> Compound & Target
-        self.W1 = _hop_matrix(hidden)                 # hop 1: {Document, ModelSystem, Target} -> Assay
-        self.W2_compound = _hop_matrix(hidden)         # hop 2: Assay -> Compound
-        self.W2_target = _hop_matrix(hidden)           # hop 2: Assay -> Target ("analogous weight matrix")
+        self.W1 = _hop_matrix(hidden)
+        
+        # New Attention layers for scoring neighbors
+        self.attn_hop1 = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
+        self.attn_hop2_c = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
+        self.attn_hop2_t = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
 
+        self.W2_compound = _hop_matrix(hidden)
+        self.W2_target = _hop_matrix(hidden)
+        
         # --- Prediction head (§8) ---------------------------------------
         self.edge_proj = nn.Linear(edge_dim, EDGE_PROJ_DIM)   # "narrow linear layer"
         self.edge_head = nn.Sequential(
@@ -127,6 +134,7 @@ class HeteroOpioidGNN(nn.Module):
             nn.Linear(256, 128), nn.ReLU(),
             nn.Linear(128, 1),
         )
+        
 
     # -----------------------------------------------------------------------
     # §6 — encode every node type's raw vector into the shared 256-dim space
@@ -163,17 +171,32 @@ class HeteroOpioidGNN(nn.Module):
 
         neighbor_vecs = torch.cat([h_d[src_d], h_m[src_m], h_t[src_t]], dim=0)
         neighbor_dst = torch.cat([dst_d, dst_m, dst_t], dim=0)
-        pooled_a = scatter(neighbor_vecs, neighbor_dst, dim=0, dim_size=n_assays, reduce="mean")
-
+        
+        # Attention logic instead of mean:
+        attn_scores_1 = self.attn_hop1(neighbor_vecs) # [num_neighbors, 1]
+        attn_weights_1 = softmax(attn_scores_1, index=neighbor_dst, dim=0, num_nodes=n_assays)
+        weighted_neighbors_1 = neighbor_vecs * attn_weights_1
+        
+        pooled_a = scatter(weighted_neighbors_1, neighbor_dst, dim=0, dim_size=n_assays, reduce="sum")
         h_a_new = self.W1(torch.cat([pooled_a, h_a], dim=-1))
 
         # --- Hop 2: pool the *updated* Assay into Compound and Target ----
         src_ac, dst_c = data[("assay", "rev_tested_in", "compound")].edge_index
-        pooled_c = scatter(h_a_new[src_ac], dst_c, dim=0, dim_size=h_c.shape[0], reduce="mean")
+        
+        attn_scores_c = self.attn_hop2_c(h_a_new[src_ac])
+        attn_weights_c = softmax(attn_scores_c, index=dst_c, dim=0, num_nodes=h_c.shape[0])
+        weighted_neighbors_c = h_a_new[src_ac] * attn_weights_c
+        
+        pooled_c = scatter(weighted_neighbors_c, dst_c, dim=0, dim_size=h_c.shape[0], reduce="sum")
         h_c_new = self.W2_compound(torch.cat([pooled_c, h_c], dim=-1))
 
-        src_at, dst_t2 = data[("assay", "tests_target", "target")].edge_index   # same Assay neighbourhood, opposite direction from hop 1
-        pooled_t = scatter(h_a_new[src_at], dst_t2, dim=0, dim_size=h_t.shape[0], reduce="mean")
+        src_at, dst_t2 = data[("assay", "tests_target", "target")].edge_index
+        
+        attn_scores_t = self.attn_hop2_t(h_a_new[src_at])
+        attn_weights_t = softmax(attn_scores_t, index=dst_t2, dim=0, num_nodes=h_t.shape[0])
+        weighted_neighbors_t = h_a_new[src_at] * attn_weights_t
+        
+        pooled_t = scatter(weighted_neighbors_t, dst_t2, dim=0, dim_size=h_t.shape[0], reduce="sum")
         h_t_new = self.W2_target(torch.cat([pooled_t, h_t], dim=-1))
 
         return h_c_new, h_t_new
