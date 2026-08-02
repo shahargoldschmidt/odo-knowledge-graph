@@ -115,7 +115,7 @@ def main():
     data = data.to(device)
 
     sampler = optuna.samplers.TPESampler(seed=args.seed)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=15)
     study = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
     study.optimize(
         lambda trial: _run_trial(trial, data, device, args.search_epochs, args.search_patience),
