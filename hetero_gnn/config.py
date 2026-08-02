@@ -128,7 +128,7 @@ CENSORED_LOSS_WEIGHT = 1.0   # doc: "tune empirically" — no number given, so l
 # Shared latent space + encoders (§6)
 # ---------------------------------------------------------------------------
 HIDDEN = 256
-ENCODER_DROPOUT = 0.4   # doc §6 is explicit: Linear -> BatchNorm -> ReLU -> Dropout(0.4)
+ENCODER_DROPOUT = 0.5   # doc §6 is explicit: Linear -> BatchNorm -> ReLU -> Dropout(0.4)
 
 # ---------------------------------------------------------------------------
 # Message passing (§7) — capped at 2 hops, custom hub-and-spoke scheme
